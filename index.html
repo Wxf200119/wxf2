@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>粒子宇宙</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}html,body{width:100%;height:100%}
+body{background:#0a0e27;font-family:'PingFang SC',sans-serif;touch-action:none;user-select:none;overflow:hidden;color:#fff}
+canvas{display:block}
+
+#cam{position:fixed;z-index:30;border-radius:14px;overflow:hidden;border:1px solid rgba(100,200,255,0.2);box-shadow:0 8px 24px rgba(0,0,0,0.5)}
+@media(orientation:landscape){#cam{top:16px;right:16px;width:140px;height:105px}}
+@media(orientation:portrait){#cam{top:16px;right:16px;width:108px;height:144px}}
+#cam-canvas{position:absolute;inset:0;width:100%;height:100%;transform:scaleX(-1)}
+
+#info{position:fixed;z-index:20;font-size:10px;letter-spacing:0.1em;background:rgba(100,150,255,0.07);border:1px solid rgba(100,200,255,0.12);border-radius:10px;padding:10px 12px;backdrop-filter:blur(8px);line-height:1.9}
+@media(orientation:landscape){#info{top:16px;left:16px}}
+@media(orientation:portrait){#info{top:16px;left:16px}}
+#info div{color:rgba(255,255,255,0.45)}#info span{color:rgba(100,220,255,0.9);font-weight:600}
+
+#hint{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:20;opacity:0;pointer-events:none;transition:opacity 0.25s}
+#hint.show{opacity:1}
+#hint-icon{font-size:52px;margin-bottom:6px}
+#hint-text{font-size:11px;letter-spacing:0.15em;color:rgba(120,210,255,0.8)}
+
+#ctrl{position:fixed;z-index:50;display:flex;gap:7px;pointer-events:auto;padding:7px;background:rgba(100,150,255,0.07);border:1px solid rgba(100,200,255,0.12);border-radius:14px;backdrop-filter:blur(8px)}
+@media(orientation:landscape){#ctrl{bottom:20px;left:20px}}
+@media(orientation:portrait){#ctrl{bottom:16px;left:16px;flex-direction:column}}
+.btn{border:1.5px solid rgba(100,200,255,0.25);background:rgba(100,200,255,0.07);color:rgba(100,200,255,0.75);border-radius:10px;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation;transition:all 0.15s;padding:10px 13px;font-size:11px;font-weight:600;min-width:46px;min-height:46px;display:flex;align-items:center;justify-content:center}
+.btn.active{background:rgba(100,200,255,0.18);border-color:rgba(100,200,255,0.7);color:#fff;box-shadow:0 0 14px rgba(100,200,255,0.3)}
+.btn:active{transform:scale(0.91)}
+
+#ripple{position:fixed;inset:0;z-index:10;pointer-events:none}
+.ripple{position:absolute;border-radius:50%;transform:translate(-50%,-50%) scale(0);animation:rip 0.55s ease-out forwards}
+@keyframes rip{0%{transform:translate(-50%,-50%) scale(0);opacity:1}100%{transform:translate(-50%,-50%) scale(1);opacity:0}}
+</style>
+</head>
+<body>
+
+<video id="video" autoplay playsinline muted style="display:none"></video>
+<div id="cam"><canvas id="cam-canvas"></canvas></div>
+
+<div id="info">
+  <div>粒子 <span id="pc">—</span></div>
+  <div>FPS <span id="fps">—</span></div>
+  <div id="mode">等待…</div>
+</div>
+
+<div id="hint"><div id="hint-icon">👆</div><div id="hint-text">TRACKING</div></div>
+<div id="ripple"></div>
+
+<div id="ctrl">
+  <button class="btn active" onclick="setShape('galaxy')">🌌</button>
+  <button class="btn" onclick="setShape('sphere')">🔮</button>
+  <button class="btn" onclick="setShape('dna')">🧬</button>
+  <button class="btn" onclick="setShape('wave')">🌊</button>
+  <button class="btn" onclick="explode()">💥</button>
+  <button class="btn" onclick="resetView()">⟳</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ── 性能：根据设备像素比自动降级粒子数 ──
+const DPR = Math.min(window.devicePixelRatio, 2);
+const IS_LOW = DPR < 1.5 || (navigator.hardwareConcurrency||4) < 4;
+const CNT = IS_LOW ? 2500 : 4000; // 降低粒子数
+
+// ── THREE SETUP ──
+const scene = new THREE.Scene();
+const cam3 = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 3000);
+cam3.position.z = 200;
+const renderer = new THREE.WebGLRenderer({antialias: !IS_LOW, powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(DPR, 1.5)); // 限制渲染分辨率
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0e27, 1);
+document.body.appendChild(renderer.domElement);
+renderer.domElement.style.cssText = 'position:fixed;inset:0;z-index:1';
+
+// ── PARTICLES ──
+let shape='galaxy', geo, mat, pts;
+let pos, vel, base, col, orig;
+let time=0, fc=0, fpsT=0;
+
+const hsl=(h,s,l)=>{h=(h%360)/360;const q=l<.5?l*(1+s):l+s-l*s,p=2*l-q;const f=(p,q,t)=>{t=(t+1)%1;return t<1/6?p+(q-p)*6*t:t<.5?q:t<2/3?p+(q-p)*(2/3-t)*6:p};return[f(p,q,h+1/3),f(p,q,h),f(p,q,h-1/3)]};
+
+const SHAPES = {
+  galaxy:(i,n)=>{const t=Math.random(),r=t*80,a=(i%3)*(Math.PI*2/3)+t*Math.PI*4;return[Math.cos(a)*r+(Math.random()-.5)*10,(Math.random()-.5)*10,Math.sin(a)*r+(Math.random()-.5)*10]},
+  sphere:(i,n)=>{const phi=Math.acos(2*Math.random()-1),th=Math.random()*Math.PI*2,r=55+(Math.random()-.5)*14;return[r*Math.sin(phi)*Math.cos(th),r*Math.cos(phi),r*Math.sin(phi)*Math.sin(th)]},
+  dna:(i,n)=>{const t=(i/n)*Math.PI*14-Math.PI*7,off=i%2?Math.PI:0;return[Math.cos(t+off)*20+(Math.random()-.5)*2,t*6,Math.sin(t+off)*20+(Math.random()-.5)*2]},
+  wave:(i,n)=>{const cols=Math.ceil(Math.sqrt(n*1.6)),c=i%cols,r=Math.floor(i/cols);return[(c/cols-.5)*160,0,(r/Math.ceil(n/cols)-.5)*160]}
+};
+const COLORS = {
+  galaxy:(i,n)=>hsl(210+(i/n)*70,0.85,0.55),
+  sphere:(i,n)=>hsl((i/n)*360,0.9,0.6),
+  dna:(i,n)=>i%2?hsl(20,0.95,0.6):hsl(200,0.9,0.6),
+  wave:(i,n)=>hsl(180+(i/n)*100,0.85,0.55)
+};
+
+const build = n => {
+  if(pts) scene.remove(pts);
+  geo = new THREE.BufferGeometry();
+  pos=new Float32Array(n*3); vel=new Float32Array(n*3);
+  base=new Float32Array(n*3); col=new Float32Array(n*3); orig=new Float32Array(n*3);
+  for(let i=0;i<n;i++){
+    const[x,y,z]=SHAPES[shape](i,n);
+    pos[i*3]=base[i*3]=x; pos[i*3+1]=base[i*3+1]=y; pos[i*3+2]=base[i*3+2]=z;
+    const[r,g,b]=COLORS[shape](i,n);
+    col[i*3]=orig[i*3]=r; col[i*3+1]=orig[i*3+1]=g; col[i*3+2]=orig[i*3+2]=b;
+  }
+  geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  geo.setAttribute('color',new THREE.BufferAttribute(col,3));
+  mat = new THREE.PointsMaterial({size:1.4,vertexColors:true,transparent:true,opacity:0.88,blending:THREE.AdditiveBlending,depthWrite:false});
+  pts = new THREE.Points(geo,mat);
+  scene.add(pts);
+  document.getElementById('pc').textContent=n.toLocaleString();
+};
+
+// 背景星星（少量）
+const sg=new THREE.BufferGeometry();
+const sp=new Float32Array(1500*3);
+for(let i=0;i<1500;i++){const r=450+Math.random()*200,phi=Math.acos(2*Math.random()-1),th=Math.random()*Math.PI*2;sp[i*3]=r*Math.sin(phi)*Math.cos(th);sp[i*3+1]=r*Math.cos(phi);sp[i*3+2]=r*Math.sin(phi)*Math.sin(th)}
+sg.setAttribute('position',new THREE.BufferAttribute(sp,3));
+scene.add(new THREE.Points(sg,new THREE.PointsMaterial({size:0.5,color:0x6496ff,transparent:true,opacity:0.15})));
+
+// ── STATE ──
+let hands=[], rotX=0, rotY=0, rotZ=0, tRotX=0, tRotY=0, tRotZ=0, zoom=1, tZoom=1;
+let exploding=0, lastPos={x:.5,y:.5}, lastLm=null, rotTrig=false, lastHandAngle=null;
+let explodeVel;
+
+// ── SKELETON CANVAS (低分辨率) ──
+const skelCv = document.getElementById('cam-canvas');
+const skelCtx = skelCv.getContext('2d');
+const CONN=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+
+// 使用离屏canvas节省重绘
+const drawSkel = lms => {
+  const w=skelCv.width, h=skelCv.height;
+  skelCtx.clearRect(0,0,w,h);
+  for(const lm of lms){
+    skelCtx.strokeStyle='rgba(100,200,255,0.55)';
+    skelCtx.lineWidth=1;
+    for(const[a,b]of CONN){skelCtx.beginPath();skelCtx.moveTo(lm[a].x*w,lm[a].y*h);skelCtx.lineTo(lm[b].x*w,lm[b].y*h);skelCtx.stroke()}
+    for(let i=0;i<21;i++){const x=lm[i].x*w,y=lm[i].y*h;skelCtx.beginPath();skelCtx.arc(x,y,i?1:1.8,0,Math.PI*2);skelCtx.fillStyle=i?'rgba(100,200,255,0.55)':'rgba(100,220,255,0.9)';skelCtx.fill()}
+  }
+};
+
+// ── 指尖间距（衡量握拳/张开） ──
+const getSpread = lm => {
+  const t=[4,8,12,16,20]; let d=0;
+  for(let i=0;i<t.length;i++)for(let j=i+1;j<t.length;j++){const dx=lm[t[i]].x-lm[t[j]].x,dy=lm[t[i]].y-lm[t[j]].y;d+=Math.sqrt(dx*dx+dy*dy)}
+  return d/10;
+};
+
+// ── EXPLODE ──
+const explode = () => {
+  exploding = performance.now();
+  explodeVel = new Float32Array(CNT*3);
+  for(let i=0;i<CNT;i++){const phi=Math.acos(2*Math.random()-1),th=Math.random()*Math.PI*2;explodeVel[i*3]=Math.sin(phi)*Math.cos(th)*1.5;explodeVel[i*3+1]=Math.cos(phi)*1.5;explodeVel[i*3+2]=Math.sin(phi)*Math.sin(th)*1.5}
+  for(let r=0;r<3;r++){const el=document.createElement('div');el.className='ripple';const sz=55*(r+1);el.style.cssText=`left:50%;top:50%;width:${sz}px;height:${sz}px;border:1px solid rgba(100,200,255,${0.55-r*.15});animation-delay:${r*.1}s`;document.getElementById('ripple').appendChild(el);setTimeout(()=>el.remove(),900)}
+};
+
+// ── HINT ──
+const showHint=(icon,txt)=>{document.getElementById('hint-icon').textContent=icon;document.getElementById('hint-text').textContent=txt;const el=document.getElementById('hint');el.classList.add('show');clearTimeout(window.hT);window.hT=setTimeout(()=>el.classList.remove('show'),900)};
+
+// ── HAND CALLBACK ──
+let skelDirty = false;
+const onHands = r => {
+  const lms = r.multiHandLandmarks||[];
+  hands = [];
+  lms.forEach(lm=>{const p=lm[9];hands.push({x:p.x,y:p.y,lm})});
+  skelDirty = true;
+  const modeEl = document.getElementById('mode');
+
+  if(hands.length===1){
+    const h = hands[0];
+    const dx = h.x - lastPos.x, dy = h.y - lastPos.y;
+    const moving = dx*dx + dy*dy > 0.00014;
+
+    // 手腕倾斜角：手腕(0)→中指根(9)向量的角度
+    const wristAngle = Math.atan2(h.lm[9].y - h.lm[0].y, h.lm[9].x - h.lm[0].x);
+
+    if(moving){
+      // ── 移动 → X/Y 旋转，Z不变，记录当前腕角为基准 ──
+      tRotY += dx * 0.005;
+      tRotX += dy * 0.004;
+      tRotX = Math.max(-Math.PI, Math.min(Math.PI, tRotX));
+
+      // 中心→边缘 触发 90° 跳转
+      const d = (h.x-.5)**2 + (h.y-.5)**2;
+      if(d > 0.1225 && !rotTrig){
+        const a = Math.atan2(h.y-.5, h.x-.5);
+        if(a > -Math.PI/4 && a < Math.PI/4)         tRotY += Math.PI/2;
+        else if(a >= Math.PI/4 && a < 3*Math.PI/4)  tRotX -= Math.PI/2;
+        else if(a >= 3*Math.PI/4||a < -3*Math.PI/4) tRotY -= Math.PI/2;
+        else                                          tRotX += Math.PI/2;
+        rotTrig = true;
+      } else if(d < 0.09) rotTrig = false;
+
+      lastHandAngle = wristAngle; // 移动期间持续更新基准，静止后不突变
+      modeEl.textContent = 'XY 旋转';
+
+    } else {
+      // ── 静止 → 分两个独立子模式 ──
+      const spread    = getSpread(h.lm);
+      const prevSpread = lastLm ? getSpread(lastLm) : spread;
+      const spreadDelta = spread - prevSpread;
+
+      // 1. 手指张合幅度明显 → 缩放（优先级最高）
+      if(Math.abs(spreadDelta) > 0.002){
+        tZoom = Math.max(0.3, Math.min(5, tZoom + spreadDelta * 10));
+        const label = spread > 0.18 ? '张开' : spread < 0.08 ? '握拳' : '—';
+        modeEl.textContent = `${label} ${Math.round(tZoom*10)/10}x`;
+        if(spread > 0.18) showHint('🖐','放大');
+        else if(spread < 0.08) showHint('✊','缩小');
+        lastHandAngle = wristAngle; // 更新基准，防止缩放结束后Z突变
+
+      // 2. 腕部旋转 → Z 轴旋转
+      } else if(lastHandAngle !== null){
+        let dA = wristAngle - lastHandAngle;
+        if(dA >  Math.PI) dA -= Math.PI*2;
+        if(dA < -Math.PI) dA += Math.PI*2;
+        // 过滤微小抖动，限制最大单帧变化量
+        if(Math.abs(dA) > 0.015 && Math.abs(dA) < 0.4){
+          tRotZ += dA * 0.9;
+          modeEl.textContent = `Z 旋转`;
+          showHint('🔄','Z轴');
+        }
+        lastHandAngle = wristAngle;
+      } else {
+        lastHandAngle = wristAngle;
+      }
+    }
+
+    lastPos = {x:h.x, y:h.y};
+    lastLm  = h.lm;
+
+  } else {
+    modeEl.textContent = '无检测';
+    lastLm = null; rotTrig = false; lastHandAngle = null;
+    if(!lms.length) skelCtx.clearRect(0,0,skelCv.width,skelCv.height);
+  }
+};
+
+// ── CAMERA INIT ──
+(async()=>{
+  try{
+    const video=document.getElementById('video');
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:320},height:{ideal:240}},audio:false}); // 降低摄像头分辨率
+    video.srcObject=stream; await video.play();
+    const camEl=document.getElementById('cam');
+    skelCv.width=camEl.offsetWidth; skelCv.height=camEl.offsetHeight;
+    const h=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`});
+    h.setOptions({maxNumHands:1,modelComplexity:0,minDetectionConfidence:0.65,minTrackingConfidence:0.55}); // 单手+轻量模型
+    h.onResults(onHands);
+    let frameSkip=0;
+    const mpCam=new Camera(video,{
+      onFrame:async()=>{
+        frameSkip++;
+        if(frameSkip%2===0) await h.send({image:video}); // 每隔一帧处理，减少CPU占用
+      },
+      width:320,height:240
+    });
+    await mpCam.start();
+    document.getElementById('mode').textContent='检测中…';
+  }catch(e){document.getElementById('mode').textContent='摄像头失败'}
+})();
+
+// ── PHYSICS（优化：减少每帧计算量） ──
+let physFrame = 0;
+const update = () => {
+  const n = CNT;
+  // Wave/Galaxy形变每2帧算一次
+  if(physFrame%2===0){
+    if(shape==='wave'){
+      const cols=Math.ceil(Math.sqrt(n*1.6));
+      for(let i=0;i<n;i++){base[i*3+1]=Math.sin(base[i*3]*.055+time*2)*Math.cos(base[i*3+2]*.048+time*1.4)*20}
+    }else if(shape==='galaxy'){
+      for(let i=0;i<n;i++){
+        const bx=base[i*3],bz=base[i*3+2],r=Math.sqrt(bx*bx+bz*bz),sw=0.003/(r*.02+0.5);
+        const c=Math.cos(sw),s=Math.sin(sw);
+        base[i*3]=bx*c-bz*s; base[i*3+2]=bx*s+bz*c;
+      }
+    }
+  }
+
+  // 爆炸效果
+  if(exploding&&performance.now()-exploding<2000){
+    const t=(performance.now()-exploding)/1000;
+    const ease=t<0.3?1-Math.pow(1-t/0.3,3):Math.exp(-t*1.6);
+    for(let i=0;i<n;i++){
+      vel[i*3]+=explodeVel[i*3]*ease*140*0.016;
+      vel[i*3+1]+=explodeVel[i*3+1]*ease*140*0.016;
+      vel[i*3+2]+=explodeVel[i*3+2]*ease*140*0.016;
+      const heat=ease*1.2;
+      col[i*3]=orig[i*3]+heat*(1-orig[i*3]);
+      col[i*3+1]=orig[i*3+1]+heat*.3;
+      col[i*3+2]=orig[i*3+2]*(1-heat*.7);
+    }
+  }
+
+  const hasHand=hands.length>0;
+  const retStr=hasHand?0.08:0.022, damp=hasHand?0.92:0.965;
+  const restoreCol=!exploding||performance.now()-exploding>2000;
+
+  for(let i=0;i<n;i++){
+    const i3=i*3;
+    vel[i3]+=(base[i3]-pos[i3])*retStr;
+    vel[i3+1]+=(base[i3+1]-pos[i3+1])*retStr;
+    vel[i3+2]+=(base[i3+2]-pos[i3+2])*retStr;
+    vel[i3]*=damp; vel[i3+1]*=damp; vel[i3+2]*=damp;
+    pos[i3]+=vel[i3]; pos[i3+1]+=vel[i3+1]; pos[i3+2]+=vel[i3+2];
+    if(restoreCol){
+      col[i3]+=(orig[i3]-col[i3])*.06;
+      col[i3+1]+=(orig[i3+1]-col[i3+1])*.06;
+      col[i3+2]+=(orig[i3+2]-col[i3+2])*.06;
+    }
+  }
+  physFrame++;
+};
+
+// ── RENDER LOOP ──
+const animate = () => {
+  requestAnimationFrame(animate);
+  time += 0.016;
+
+  rotX+=(tRotX-rotX)*.08; rotY+=(tRotY-rotY)*.08; rotZ+=(tRotZ-rotZ)*.08;
+  pts.rotation.x=rotX; pts.rotation.y=rotY; pts.rotation.z=rotZ;
+  zoom+=(tZoom-zoom)*.25;
+  cam3.position.z=200/zoom;
+
+  update();
+
+  // 骨骼只在有变化时重绘
+  if(skelDirty){
+    if(hands.length) drawSkel(hands.map(h=>h.lm));
+    skelDirty=false;
+  }
+
+  geo.attributes.position.needsUpdate=true;
+  geo.attributes.color.needsUpdate=true;
+  renderer.render(scene,cam3);
+
+  fc++;
+  const now=performance.now();
+  if(now-fpsT>800){document.getElementById('fps').textContent=Math.round(fc*1000/(now-fpsT));fc=0;fpsT=now}
+};
+
+// ── UI ──
+window.resetView=()=>{
+  tRotX=0; tRotY=0; tRotZ=0; tZoom=1;
+  showHint('⟳','已重置');
+};
+
+window.setShape=s=>{
+  shape=s;
+  document.querySelectorAll('.btn').forEach(b=>b.classList.toggle('active',b.textContent.includes({galaxy:'🌌',sphere:'🔮',dna:'🧬',wave:'🌊'}[s])));
+  // 清空速度
+  if(vel) vel.fill(0);
+  build(CNT); rotX=rotY=rotZ=tRotX=tRotY=tRotZ=0;
+};
+
+window.addEventListener('resize',()=>{
+  cam3.aspect=innerWidth/innerHeight; cam3.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+build(CNT); animate(); showHint('👆','等待检测…');
+</script>
+</body>
+</html>
